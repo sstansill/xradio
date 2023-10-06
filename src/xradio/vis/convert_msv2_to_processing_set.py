@@ -194,18 +194,17 @@ def create_coordinates(
     xds = xds.assign_coords(coords)
 
     # Add metadata to coordinates:
-    measures_freq_ref = spw_xds["meas_freq_ref"].data
+    # measures_freq_ref = spw_xds["meas_freq_ref"].data
     xds.frequency.attrs["type"] = "spectral_coord"
     xds.frequency.attrs["units"] = spw_xds.attrs["other"]["msv2"]["ctds_attrs"][
         "column_descriptions"
     ]["CHAN_FREQ"]["keywords"]["QuantumUnits"][0]
-    xds.frequency.attrs["velocity_frame"] = spw_xds.attrs["other"]["msv2"][
-        "ctds_attrs"
-    ]["column_descriptions"]["CHAN_FREQ"]["keywords"]["MEASINFO"]["TabRefTypes"][
-        measures_freq_ref
-    ]
+    # xds.frequency.attrs["velocity_frame"] = spw_xds.attrs["other"]["msv2"][
+    #     "ctds_attrs"
+    # ]["column_descriptions"]["CHAN_FREQ"]["keywords"]["MEASINFO"]["TabRefTypes"][
+    #     measures_freq_ref
+    # ]
     xds.frequency.attrs["spectral_window_name"] = str(spw_xds.name.values)
-    xds.frequency.attrs["reference_frequency"] = {"dims":"", "data":float(spw_xds.ref_frequency.values), "attrs":{"type":"spectral_coord","units":"Hz","velocity_frame":xds.frequency.attrs["velocity_frame"]}}
     xds.frequency.attrs["effective_channel_width"] = "EFFECTIVE_CHANNEL_WIDTH"
     # Add if doppler table is present
     # xds.frequency.attrs["doppler_velocity"] =
@@ -240,9 +239,7 @@ def create_coordinates(
 def convert_and_write_partition(
     infile: str,
     outfile: str,
-    intent: str,
     ddi: int = 0,
-    state_ids=None,
     field_id: int = None,
     ignore_msv2_cols: Union[list, None] = None,
     chunks_on_disk: Union[Dict, None] = None,
@@ -255,20 +252,10 @@ def convert_and_write_partition(
 
     file_name = (
         outfile
-        + "/"
-        + outfile.replace(".vis.zarr", "").split("/")[-1]
-        + "_ddi_"
-        + str(ddi)
-        + "_intent_"
-        + intent
     )
     taql_where = f"where (DATA_DESC_ID = {ddi})"
 
-    if isinstance(state_ids, numbers.Integral):
-        taql_where += f" AND (STATE_ID = {state_ids})"
-    else:
-        state_ids_or = " OR STATE_ID = ".join(np.char.mod("%d", state_ids))
-        taql_where += f" AND (STATE_ID = {state_ids_or})"
+
 
     if field_id is not None:
         taql_where += f" AND (FIELD_ID = {field_id})"
@@ -445,7 +432,6 @@ def convert_and_write_partition(
             )
             del ant_xds.attrs["other"]
 
-            xds.attrs["intent"] = intent
             xds.attrs["ddi"] = ddi
             
             #Time and frequency should always be increasing
@@ -465,23 +451,6 @@ def convert_and_write_partition(
     # logging.info("Saved ms_v4 " + file_name + " in " + str(time.time() - start_with) + "s")
 
 
-def get_unqiue_intents(infile):
-    state_xds = read_generic_table(
-        infile,
-        "STATE",
-        rename_ids=subt_rename_ids["STATE"],
-    )
-
-    obs_mode_dict = {}
-    for i, obs_mode in enumerate(state_xds.obs_mode.values):
-        if obs_mode in obs_mode_dict:
-            obs_mode_dict[obs_mode].append(i)
-        else:
-            obs_mode_dict[obs_mode] = [i]
-
-    return list(obs_mode_dict.keys()), obs_mode_dict.values()
-
-
 def enumerated_product(*args):
     yield from zip(
         itertools.product(*(range(len(x)) for x in args)), itertools.product(*args)
@@ -491,7 +460,6 @@ def enumerated_product(*args):
 def convert_msv2_to_processing_set(
     infile: str,
     outfile: str,
-    partition_scheme: str,  # intent_field, subscan
     chunks_on_disk: Union[Dict, None] = None,
     compressor: numcodecs.abc.Codec = numcodecs.Zstd(level=2),
     parallel: bool = False,
@@ -508,41 +476,25 @@ def convert_msv2_to_processing_set(
     ddi_xds = read_generic_table(infile, "DATA_DESCRIPTION")
     data_desc_ids = np.arange(ddi_xds.dims["row"])
 
-    if partition_scheme == "ddi_intent_field":
-        unique_intents, state_ids = get_unqiue_intents(infile)
-        field_ids = np.arange(read_generic_table(infile, "FIELD").dims["row"])
-    elif partition_scheme == "ddi_state":
-        state_xds = read_generic_table(infile, "STATE")
-        state_ids = np.arange(state_xds.dims["row"])
-        intents = state_xds.obs_mode.values
-        # print(state_xds, intents)
-        # field_ids = [None]
-        field_ids = np.arange(read_generic_table(infile, "FIELD").dims["row"])
+    field_ids = np.arange(read_generic_table(infile, "FIELD").dims["row"])
+    # print(state_xds, intents)
+    # field_ids = [None]
+    field_ids = np.arange(read_generic_table(infile, "FIELD").dims["row"])
 
     delayed_list = []
-    partitions = {}
-    cnt = 0
 
-    # for ddi, state, field in itertools.product(data_desc_ids, state_ids, field_ids):
+    # for ddi, state, field in itertools.product(data_desc_ids, field_ids):
     #    logging.info("DDI " + str(ddi) + ", STATE " + str(state) + ", FIELD " + str(field))
 
-    for idx, pair in enumerated_product(data_desc_ids, state_ids, field_ids):
-        ddi, state_id, field_id = pair
-        # logging.debug("DDI " + str(ddi) + ", STATE " + str(state_id) + ", FIELD " + str(field_id))
-
-        if partition_scheme == "ddi_intent_field":
-            intent = unique_intents[idx[1]]
-        else:
-            intent = intents[idx[1]] + "_" + str(state_id)
+    for idx, pair in enumerated_product(data_desc_ids, field_ids):
+        ddi, field_id = pair
 
         if parallel:
             delayed_list.append(
                 dask.delayed(convert_and_write_partition)(
                     infile,
                     outfile,
-                    intent,
                     ddi,
-                    state_id,
                     field_id,
                     ignore_msv2_cols=ignore_msv2_cols,
                     chunks_on_disk=chunks_on_disk,
@@ -554,9 +506,7 @@ def convert_msv2_to_processing_set(
             convert_and_write_partition(
                 infile,
                 outfile,
-                intent,
                 ddi,
-                state_id,
                 field_id,
                 ignore_msv2_cols=ignore_msv2_cols,
                 chunks_on_disk=chunks_on_disk,
